@@ -1,4 +1,8 @@
-﻿# Sanctions Screener API
+[![RapidAPI](https://img.shields.io/badge/RapidAPI-Live-brightgreen)](https://rapidapi.com/On13uka/api/sanctions-screener)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13-blue)](https://python.org)
+
+# Sanctions Screener API
 
 Screen names against OFAC SDN (US Treasury) and UN Consolidated sanctions lists. Unified JSON response with match score, source, entity details, and AKAs.
 
@@ -89,3 +93,19 @@ Note: First startup downloads 28MB OFAC XML + 2MB UN XML (~30s).
 - Free: 100 requests/month
 - Pro: $29/month - unlimited requests, all sources
 - Enterprise: $99/month - API access, webhook alerts, bulk screening
+
+## Available on RapidAPI
+
+**Live API:** https://rapidapi.com/On13uka/api/sanctions-screener
+
+Subscribe and get instant API key. Free tier: 100 requests/month.
+
+## Other APIs in the Portfolio
+
+- [Domain WHOIS](https://github.com/On13uka/domain-whois-api)
+- [Company Info](https://github.com/On13uka/company-info-api)
+- [Email Validator](https://github.com/On13uka/email-validator-api)
+- [IP Geolocation](https://github.com/On13uka/ip-geolocation-api)
+- [Sanctions Screener](https://github.com/On13uka/sanctions-screener-api)
+
+All APIs available on RapidAPI: https://rapidapi.com/user/On13uka
