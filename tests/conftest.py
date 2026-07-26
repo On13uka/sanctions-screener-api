@@ -2,7 +2,7 @@
 
 We avoid network access entirely by pre-populating the in-memory cache of
 `app.main` with small fixture data. This makes tests fast, deterministic,
-and independent of the live OFAC/UN/OpenSanctions feeds.
+and independent of the live OFAC/UN/EU/UK feeds.
 """
 from __future__ import annotations
 
@@ -34,30 +34,32 @@ def populate_cache(monkeypatch):
     main._cache["ofac"]["data"] = _load_fixture("ofac-fixture.json")
     main._cache["ofac"]["updated"] = now
     main._cache["ofac"]["loading"] = False
+    main._cache["ofac"]["status"] = None
 
     main._cache["un"]["data"] = _load_fixture("un-fixture.json")
     main._cache["un"]["updated"] = now
     main._cache["un"]["loading"] = False
+    main._cache["un"]["status"] = None
 
-    main._cache["eu"]["data"] = _load_fixture("opensanctions-eu.json")
+    main._cache["eu"]["data"] = _load_fixture("eu-fixture.json")
     main._cache["eu"]["updated"] = now
     main._cache["eu"]["loading"] = False
+    main._cache["eu"]["status"] = None
 
-    main._cache["uk"]["data"] = _load_fixture("opensanctions-uk.json")
+    main._cache["uk"]["data"] = _load_fixture("uk-fixture.json")
     main._cache["uk"]["updated"] = now
     main._cache["uk"]["loading"] = False
+    main._cache["uk"]["status"] = None
 
     # Make refresh functions no-ops so `refresh=True` queries don't download.
     async def _noop_xml(source):
         return None
 
-    async def _noop_os(short):
+    async def _noop_govfeed(short):
         return None
 
     monkeypatch.setattr(main, "_refresh_xml_cache", _noop_xml, raising=False)
-    monkeypatch.setattr(
-        main, "_refresh_opensanctions_source_async", _noop_os, raising=False
-    )
+    monkeypatch.setattr(main, "_refresh_govfeed_async", _noop_govfeed, raising=False)
 
 
 @pytest.fixture()

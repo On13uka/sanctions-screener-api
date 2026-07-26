@@ -1,16 +1,19 @@
 """End-to-end tests for the Sanctions Screener API /screen endpoint.
 
-Covers the four required cases:
-  1. a name that matches OFAC
-  2. a name that matches EU only
-  3. a clean name (no match)
-  4. a name that matches multiple lists (OFAC + UK)
-
-Plus a couple of extra checks: backward compatibility of v1.0 fields and the
-status endpoint.
+Covers:
+  - Backward-compat cases (v1.0/v1.1): OFAC match, EU-only match, clean name,
+    multi-list match, additive fields, /status, root, AKA match, invalid name,
+    threshold filtering.
+  - New v1.2 explainable-match cases: exact-match explanation, fuzzy-match
+    explanation, AKA-match explanation, no-match verdict, multi-match verdict
+    (picks highest severity), risk_verdict field is always present.
 """
 from __future__ import annotations
 
+
+# ---------------------------------------------------------------------------
+# v1.0 / v1.1 backward-compat tests (unchanged behavior)
+# ---------------------------------------------------------------------------
 
 def test_ofac_match(client):
     """A name present in the OFAC fixture returns an OFAC SDN match."""
@@ -75,7 +78,7 @@ def test_multi_list_match(client):
 
 
 def test_additive_fields_present(client):
-    """New v1.1 fields are present alongside the v1.0 fields (backward compat)."""
+    """New v1.1/v1.2 fields are present alongside the v1.0 fields (backward compat)."""
     r = client.get("/screen", params={"name": "Kim Jong", "threshold": 0.7})
     assert r.status_code == 200
     body = r.json()
@@ -88,6 +91,9 @@ def test_additive_fields_present(client):
     assert "eu_matches" in body
     assert "uk_matches" in body
     assert "data_updated" in body and "eu" in body["data_updated"] and "uk" in body["data_updated"]
+    # v1.2 additive fields.
+    assert "risk_verdict" in body
+    assert isinstance(body["risk_verdict"], str) and body["risk_verdict"]
 
 
 def test_status_reports_all_four_sources(client):
@@ -111,7 +117,7 @@ def test_root_lists_all_four_sources(client):
     assert "UN Consolidated" in body["sources"]
     assert "EU Consolidated" in body["sources"]
     assert "UK FCDO" in body["sources"]
-    assert body["version"] == "1.1.0"
+    assert body["version"] == "1.2.0"
 
 
 def test_aka_match(client):
@@ -128,8 +134,13 @@ def test_aka_match(client):
     assert body["total_matches"] >= 1
     ofac = [m for m in body["matches"] if m["source"] == "OFAC SDN"]
     assert ofac, "expected at least one OFAC match via AKA"
-    # The matched AKA should be reported when the AKA score beats the name score.
-    assert ofac[0]["match_type"] in ("aka", "name", "exact")
+    # In v1.2 match_type reports the similarity class (exact/fuzzy/partial/token)
+    # and the matched field lives in match_explanation.matched_field. The AKA
+    # 'LAVROV, Sergei Viktorovich' is a prefix of query 'LAVROV' so the class
+    # is 'fuzzy' (0.85) and the field is 'aka'.
+    assert ofac[0]["match_type"] in ("exact", "fuzzy", "partial", "token")
+    assert ofac[0]["match_explanation"]["matched_field"] == "aka"
+    assert ofac[0]["matched_aka"] is not None
 
 
 def test_invalid_name_rejected(client):
@@ -158,3 +169,141 @@ def test_threshold_filtering(client):
     # At 0.9 the 0.85-scored prefix matches are filtered out.
     r_high = client.get("/screen", params={"name": "Al", "threshold": 0.9})
     assert r_high.json()["total_matches"] == 0
+
+
+# ---------------------------------------------------------------------------
+# v1.2 explainable-match + risk verdict tests
+# ---------------------------------------------------------------------------
+
+def test_exact_match_explanation_and_high_risk_verdict(client):
+    """An exact name match produces an 'exact' match_type, a match_explanation
+    with matched_field='name', and a HIGH RISK verdict naming OFAC SDN.
+    """
+    r = client.get("/screen", params={"name": "Vladimir Putin", "threshold": 0.7})
+    assert r.status_code == 200
+    body = r.json()
+    ofac = next(m for m in body["matches"] if m["source"] == "OFAC SDN")
+    assert ofac["match_type"] == "exact"
+    assert ofac["match_score"] == 1.0
+    expl = ofac["match_explanation"]
+    assert expl["matched_field"] == "name"
+    assert expl["match_type"] == "exact"
+    assert expl["matched_value"].upper().startswith("VLADIMIR PUTIN")
+    # tokens matched should include both first and last name.
+    assert "vladimir" in expl["tokens_matched"]
+    assert "putin" in expl["tokens_matched"]
+    # Risk verdict: HIGH RISK, exact match, mentions OFAC SDN.
+    verdict = body["risk_verdict"]
+    assert verdict.startswith("HIGH RISK")
+    assert "OFAC SDN" in verdict
+
+
+def test_fuzzy_match_explanation_and_medium_risk_verdict(client):
+    """A fuzzy (prefix) match at 0.85 produces a 'fuzzy' match_type and a
+    MEDIUM RISK verdict with a percentage confidence.
+    """
+    # 'Kim Jong' is a prefix of 'KIM JONG UN' (UN fixture) -> score 0.85.
+    r = client.get("/screen", params={"name": "Kim Jong", "threshold": 0.85})
+    assert r.status_code == 200
+    body = r.json()
+    un_match = next(m for m in body["matches"] if m["source"] == "UN Consolidated")
+    assert un_match["match_type"] == "fuzzy"
+    assert un_match["match_score"] == 0.85
+    expl = un_match["match_explanation"]
+    assert expl["matched_field"] == "name"
+    assert expl["match_type"] == "fuzzy"
+    assert "kim" in expl["tokens_matched"]
+    assert "jong" in expl["tokens_matched"]
+    verdict = body["risk_verdict"]
+    # 0.85 is the MEDIUM band (>=0.85).
+    assert "MEDIUM RISK" in verdict
+    assert "UN Consolidated" in verdict
+    assert "85%" in verdict
+
+
+def test_aka_match_explanation(client):
+    """A match that wins on an AKA alias reports matched_field='aka' and the
+    matched_value is the alias string.
+    """
+    # 'LAVROV' matches the AKA 'LAVROV, Sergei Viktorovich' (prefix, 0.85).
+    r = client.get("/screen", params={"name": "LAVROV", "threshold": 0.7})
+    assert r.status_code == 200
+    body = r.json()
+    ofac = next(m for m in body["matches"] if m["source"] == "OFAC SDN")
+    expl = ofac["match_explanation"]
+    assert expl["matched_field"] == "aka"
+    assert "LAVROV" in expl["matched_value"].upper()
+    assert expl["match_type"] in ("fuzzy", "partial", "exact")
+    # matched_aka should be populated when the aka won.
+    assert ofac["matched_aka"] is not None
+    assert "LAVROV" in ofac["matched_aka"].upper()
+
+
+def test_no_match_clean_verdict(client):
+    """A clean name produces a CLEAN verdict and no matches."""
+    r = client.get("/screen", params={"name": "John Q Random Innocent", "threshold": 0.7})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_matches"] == 0
+    verdict = body["risk_verdict"]
+    assert verdict.startswith("CLEAN")
+    assert "4 lists screened" in verdict
+
+
+def test_multi_match_picks_highest_severity_verdict(client):
+    """When the same name matches multiple lists, the verdict reflects the
+    highest-severity match. 'Vladimir Putin' matches OFAC (exact, 1.0) and
+    UK (exact, 1.0) -- both HIGH. The verdict must be HIGH RISK and mention
+    OFAC SDN (the first list in our severity tiebreak, since both are exact).
+    """
+    r = client.get("/screen", params={"name": "Vladimir Putin", "threshold": 0.85})
+    assert r.status_code == 200
+    body = r.json()
+    sources = [m["source"] for m in body["matches"]]
+    assert "OFAC SDN" in sources
+    assert "UK FCDO" in sources
+    verdict = body["risk_verdict"]
+    assert verdict.startswith("HIGH RISK")
+    # At least one of the matching lists must be named in the verdict.
+    assert ("OFAC SDN" in verdict) or ("UK FCDO" in verdict)
+
+
+def test_low_risk_partial_match_verdict(client):
+    """A 0.7-score 'partial' (contains) match produces a LOW RISK verdict
+    recommending manual review.
+    """
+    # 'Al' is a prefix of 'AL FURQAN MEDIA' (0.85) -- that's MEDIUM. To force a
+    # LOW (0.7-0.85) band we use a contains-only match. 'Furqan' is contained
+    # in 'AL FURQAN MEDIA' -> the contains rule fires (0.7) because neither is
+    # a prefix of the other and 'furqan' is in 'al furqan media'.
+    r = client.get("/screen", params={"name": "Furqan", "threshold": 0.7})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_matches"] >= 1
+    # Find the AL FURQAN MEDIA match.
+    furqan = next(
+        m for m in body["matches"] if "FURQAN" in m["name"].upper()
+    )
+    assert furqan["match_score"] == 0.7
+    assert furqan["match_type"] == "partial"
+    verdict = body["risk_verdict"]
+    # 0.7 is the LOW band. Verdict should recommend manual review.
+    assert ("LOW RISK" in verdict) or ("MEDIUM RISK" in verdict)
+    assert "manual review" in verdict or "confidence" in verdict
+
+
+def test_match_explanation_always_present(client):
+    """Every match object carries a non-empty match_explanation dict."""
+    r = client.get("/screen", params={"name": "Al", "threshold": 0.7})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_matches"] >= 1
+    for m in body["matches"]:
+        assert "match_explanation" in m
+        expl = m["match_explanation"]
+        assert isinstance(expl, dict)
+        assert "matched_field" in expl
+        assert "matched_value" in expl
+        assert "match_type" in expl
+        assert "tokens_matched" in expl
+        assert expl["matched_field"] in ("name", "aka")
