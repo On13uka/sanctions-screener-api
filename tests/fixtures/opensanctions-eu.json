@@ -1,0 +1,26 @@
+[
+  {
+    "entity_id": "eu-fx-001",
+    "name": "DMITRY MEDVEDEV",
+    "type": "Person",
+    "program": "eu_fsf",
+    "remarks": "Deputy Chairman of the Security Council of the Russian Federation",
+    "akas": ["MEDVEDEV, Dmitry Anatolyevich", "Dmitriy Medvedev"]
+  },
+  {
+    "entity_id": "eu-fx-002",
+    "name": "ROSTELECOM JSC",
+    "type": "Company",
+    "program": "eu_fsf",
+    "remarks": "Russian telecommunications company",
+    "akas": ["PJSC Rostelecom", "Rostelecom"]
+  },
+  {
+    "entity_id": "eu-fx-003",
+    "name": "MARIA ZAKHAROVA",
+    "type": "Person",
+    "program": "eu_fsf",
+    "remarks": "Director of Information and Press Department, MFA Russia",
+    "akas": ["ZHAKHAROVA, Maria Vladimirovna"]
+  }
+]

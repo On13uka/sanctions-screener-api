@@ -3,3 +3,15 @@ __pycache__/
 *.pyc
 .env
 .pytest_cache/
+*.egg-info/
+*.log
+*.json.bak
+
+# On-disk OpenSanctions cache (downloaded dumps, can be large; do not commit).
+data/
+data/*.json
+data/*.meta.json
+
+# Test fixtures: keep small committed fixtures, ignore large/generated ones.
+tests/fixtures/*.local.json
+tests/fixtures/generated/

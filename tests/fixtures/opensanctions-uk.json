@@ -1,0 +1,26 @@
+[
+  {
+    "entity_id": "uk-fx-001",
+    "name": "BORIS JOHNSON MOCK",
+    "type": "Person",
+    "program": "gb_fcdo_sanctions",
+    "remarks": "Test fixture entry (not a real sanction)",
+    "akas": ["Johnson Mock Boris"]
+  },
+  {
+    "entity_id": "uk-fx-002",
+    "name": "VLADIMIR PUTIN",
+    "type": "Person",
+    "program": "gb_fcdo_sanctions",
+    "remarks": "President of Russia (also on OFAC/UN/EU lists for multi-match test)",
+    "akas": ["PUTIN, Vladimir Vladimirovich"]
+  },
+  {
+    "entity_id": "uk-fx-003",
+    "name": "GAZPROMBANK",
+    "type": "Company",
+    "program": "gb_fcdo_sanctions",
+    "remarks": "Russian state-owned bank",
+    "akas": ["GPB JSC", "Gazprombank Joint Stock Company"]
+  }
+]

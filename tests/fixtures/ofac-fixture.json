@@ -1,0 +1,26 @@
+[
+  {
+    "entity_id": "ofac-fx-001",
+    "name": "VLADIMIR PUTIN",
+    "type": "Individual",
+    "program": "RUSSIA-EO14024",
+    "remarks": "President of the Russian Federation",
+    "akas": ["Vladimir Vladimirovich Putin", "PUTIN, Vladimir Vladimirovich"]
+  },
+  {
+    "entity_id": "ofac-fx-002",
+    "name": "SERGEI LAVROV",
+    "type": "Individual",
+    "program": "RUSSIA-EO14024",
+    "remarks": "Minister of Foreign Affairs",
+    "akas": ["LAVROV, Sergei Viktorovich"]
+  },
+  {
+    "entity_id": "ofac-fx-003",
+    "name": "AL FURQAN MEDIA",
+    "type": "Entity",
+    "program": "SDGT",
+    "remarks": "Media outlet",
+    "akas": ["Al-Furqan"]
+  }
+]
