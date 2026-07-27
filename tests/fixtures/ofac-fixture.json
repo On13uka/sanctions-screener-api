@@ -22,5 +22,13 @@
     "program": "SDGT",
     "remarks": "Media outlet",
     "akas": ["Al-Furqan"]
+  },
+  {
+    "entity_id": "ofac-fx-004",
+    "name": "LAZARUS GROUP",
+    "type": "Entity",
+    "program": "DPRK2",
+    "remarks": "North Korean state-sponsored cyber actor; Digital Currency Address - XBT 1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2; Digital Currency Address - ETH 0x901bb9583b24d97e99513c6778dc6888ab6870e; Digital Currency Address - LTC LLGmqH3VYBhzY7cpxc2r5XG2KftBfkY2hC; For more information please see 2022-04-22.",
+    "akas": ["Hidden Cobra", "Guardians of Peace"]
   }
 ]

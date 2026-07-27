@@ -1,17 +1,48 @@
 [![RapidAPI](https://img.shields.io/badge/RapidAPI-Live-brightgreen)](https://rapidapi.com/On13uka/api/sanctions-screener)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-17%20pass-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-31%20pass-brightgreen)](#tests)
 
 # Sanctions Screener API
 
-Screen names against **four** government sanctions lists with a single,
-unified JSON response: OFAC SDN (US Treasury), UN Consolidated, EU
-Financial Sanctions Files (FSF), and UK FCDO Sanctions List (UKSL). Returns
-match score, source, entity details, AKAs (aliases), an explainable match
+Screen names against **five** government sanctions lists with a single,
+unified JSON response: OFAC SDN (US Treasury), UN Consolidated, EU Financial
+Sanctions Files (FSF), UK FCDO Sanctions List (UKSL), and the US BIS
+Consolidated Screening List (DPL + Entity List + UVL + MEU). Returns match
+score, source, entity details, AKAs (aliases), an explainable match
 explanation, and a plain-English risk verdict.
 
+Also includes two table-stakes features competitors charge extra for:
+
+- **Crypto wallet screening** (`/screen_crypto`) -- check a BTC/ETH/XMR/LTC/...
+  wallet address against OFAC SDN digital currency addresses (US public
+  domain, per OFAC FAQ 563). Free because the data is already inside the
+  OFAC SDN feed.
+- **Webhook monitoring** (`/monitor` family) -- register a name + webhook URL
+  and get a `new_match` POST the moment a new designation appears. Best-effort
+  delivery, simple JSON-file storage (documented as not production-grade).
+
 ## What's new
+
+### v1.3 -- BIS CSL + Crypto wallet screening + Webhook monitoring
+
+- **US BIS Consolidated Screening List** (`BIS CSL` source): trade.gov CSL
+  API integration covering the BIS Denied Persons List (DPL), Entity List,
+  Unverified List (UVL), and Military End-User (MEU) List. US public domain
+  (17 USC 105). Free API key from `https://developer.trade.gov/` set via the
+  `TRADE_GOV_API_KEY` env var. Degrades gracefully (empty + status warning)
+  when the key is missing. 24h on-disk cache.
+- **`/screen_crypto` endpoint**: screen a crypto wallet address against OFAC
+  SDN digital currency addresses (BTC/XBT, ETH, LTC, XMR, XRP, DASH, NEO,
+  MIOTA, PTR, and any other symbol OFAC publishes). In-memory index rebuilt
+  on every OFAC refresh; bounded at ~100k addresses (<20MB). Returns
+  `sanctioned: true/false`, `matches[]`, and a plain-English `risk_verdict`.
+- **`/monitor` family**: `POST /monitor` (register), `GET /monitor/{id}`,
+  `DELETE /monitor/{id}`, `POST /monitor/run` (cron-callable). Persists to
+  `data/monitors.json` (simple JSON file -- NOT production-grade; use Redis +
+  a real queue for scale). Webhook delivery: 10s timeout, one retry,
+  best-effort, never blocks the registering request.
+- 14 new pytest tests (31 total, all mocked, all pass).
 
 ### v1.2 -- Explainable Match + Plain-English Risk Verdict (killer differentiator)
 
@@ -50,9 +81,11 @@ explanation, and a plain-English risk verdict.
 | UN Security Council Consolidated List | direct XML feed | on startup / `refresh=true` | UN public data |
 | EU Financial Sanctions Files (FSF) | official EU FSF XML (auth-gated, free EU Login token) | daily (24h TTL cache) | European Commission reuse policy (commercial OK w/ attribution) |
 | UK FCDO Sanctions List (UKSL) | official UK FCDO static XML | daily (24h TTL cache) | Open Government Licence v3.0 (commercial OK w/ attribution) |
+| US BIS Consolidated Screening List (CSL) | trade.gov CSL API (free `TRADE_GOV_API_KEY`) | daily (24h TTL cache) | US public domain (17 USC 105) |
+| OFAC SDN digital currency addresses | parsed from OFAC SDN `<remarks>` (already loaded) | on every OFAC refresh | US public domain (17 USC 105) |
 
-Total: 20,000+ sanctioned individuals, entities, and vessels across four
-jurisdictions.
+Total: 20,000+ sanctioned individuals, entities, and vessels across five
+jurisdictions, plus OFAC-sanctioned crypto wallet addresses.
 
 > **Note on the EU FSF token.** The EU FSF XML download is auth-gated: the
 > operator must register a free EU Login account at
@@ -60,9 +93,17 @@ jurisdictions.
 > personal download token, and set it as the `EU_FSF_TOKEN` environment
 > variable. When the token is missing, the EU loader returns an empty list
 > (and surfaces a clear status message on `/status`); the rest of the API
-> keeps working with OFAC/UN/UK data. **OpenSanctions is intentionally NOT
+> keeps working with OFAC/UN/UK/BIS data. **OpenSanctions is intentionally NOT
 > used as a fallback** -- that is exactly the dependency this version
 > removes.
+
+> **Note on the BIS CSL API key.** The trade.gov CSL endpoint requires a free
+> API key from the ITA Developer Portal at `https://developer.trade.gov/`.
+> Register, subscribe to "Data Services Platform APIs", and copy the primary
+> key from your Profile page. Set it as the `TRADE_GOV_API_KEY` environment
+> variable. When the key is missing, the BIS loader returns an empty list and
+> surfaces a clear status message on `/status`; the rest of the API keeps
+> working with OFAC/UN/EU/UK data.
 
 > **Note on the UK list.** The UK HMT/OFSI Consolidated List was deprecated
 > by the UK government on 28 January 2026 and replaced by the UK Sanctions
@@ -163,11 +204,157 @@ curl "https://your-app.onrender.com/screen?name=Vladimir+Putin&threshold=0.7"
 }
 ```
 
+### GET /screen_crypto?address=0x901b...&currency=ETH
+
+Screen a crypto wallet address against OFAC SDN digital currency addresses
+(US public domain, per OFAC FAQ 563). The index is built from the OFAC SDN
+`<remarks>` text and refreshed on every OFAC feed refresh. Supports BTC/XBT
+(Bitcoin aliases), ETH, LTC, XMR, XRP, DASH, NEO, MIOTA, PTR, and any other
+symbol OFAC publishes.
+
+**Parameters:**
+- `address` (required): wallet address (max 256 chars per OFAC FAQ 563)
+- `currency` (required): digital currency symbol (e.g. `ETH`, `BTC`, `XBT`)
+
+**Example (sanctioned address):**
+
+```bash
+curl "https://your-app.onrender.com/screen_crypto?address=0x901bb9583b24d97e99513c6778dc6888ab6870e&currency=ETH"
+```
+
+```json
+{
+  "address": "0x901bb9583b24d97e99513c6778dc6888ab6870e",
+  "currency": "ETH",
+  "sanctioned": true,
+  "matches": [
+    {
+      "source": "OFAC SDN",
+      "entity_id": "ofac-fx-004",
+      "entity_name": "LAZARUS GROUP",
+      "program": "DPRK2",
+      "currency": "ETH",
+      "address": "0x901bb9583b24d97e99513c6778dc6888ab6870e",
+      "listed_on": "2022-04-22",
+      "entity_type": "Entity"
+    }
+  ],
+  "risk_verdict": "HIGH RISK: address belongs to OFAC-sanctioned entity LAZARUS GROUP (DPRK2 program)",
+  "index_built_at": "2026-07-26T12:33:32+00:00",
+  "screened_at": "2026-07-26T12:35:12+00:00"
+}
+```
+
+**Example (clean address):**
+
+```json
+{
+  "address": "0xdeadbeef00000000000000000000000000000000",
+  "currency": "ETH",
+  "sanctioned": false,
+  "matches": [],
+  "risk_verdict": "CLEAN: address not found in OFAC SDN digital currency addresses",
+  "index_built_at": "2026-07-26T12:33:32+00:00",
+  "screened_at": "2026-07-26T12:35:12+00:00"
+}
+```
+
+### POST /monitor -- register a webhook monitor
+
+Register an entity name for ongoing monitoring. When `POST /monitor/run` is
+called (cron-callable) and a NEW match appears for the name (a list that
+wasn't matched before, or a new entity_id), the checker POSTs a webhook
+payload to the registered URL.
+
+**Request body:**
+
+```json
+{
+  "name": "Vladimir Putin",
+  "webhook_url": "https://your-app.com/sanctions-webhook",
+  "lists": ["OFAC", "UN", "EU", "UK"]
+}
+```
+
+`lists` is optional and defaults to all five (`OFAC`, `UN`, `EU`, `UK`,
+`BIS`). Allowed values: `OFAC`, `UN`, `EU`, `UK`, `BIS`.
+
+**Response:**
+
+```json
+{
+  "monitor_id": "mon_a1b2c3d4",
+  "status": "registered",
+  "name": "Vladimir Putin",
+  "webhook_url": "https://your-app.com/sanctions-webhook",
+  "lists": ["OFAC", "UN", "EU", "UK"],
+  "created_at": "2026-07-26T12:35:12+00:00",
+  "next_check": "call POST /monitor/run to trigger a check"
+}
+```
+
+### GET /monitor/{monitor_id} -- check monitor status
+
+Returns the monitor record with `last_check`, `last_match_signature`, and a
+rolling `history` array of check/delivery events.
+
+### DELETE /monitor/{monitor_id} -- unregister
+
+Returns `{"monitor_id": "...", "status": "deleted"}`.
+
+### POST /monitor/run -- trigger a check cycle (cron-callable)
+
+Triggers a background check across all registered monitors. Returns
+immediately with `202 Accepted`:
+
+```json
+{
+  "status": "accepted",
+  "message": "monitor check scheduled in background",
+  "monitors_count": 12,
+  "triggered_at": "2026-07-26T12:35:12+00:00"
+}
+```
+
+For each monitor with a NEW match, the checker POSTs this payload to the
+registered webhook URL (10s timeout, one retry, best-effort):
+
+```json
+{
+  "event": "new_match",
+  "monitor_id": "mon_a1b2c3d4",
+  "name": "Vladimir Putin",
+  "new_match": {
+    "source": "OFAC SDN",
+    "entity_id": "...",
+    "name": "VLADIMIR PUTIN",
+    "match_score": 1.0,
+    "match_type": "exact",
+    "match_explanation": { ... }
+  },
+  "screened_at": "2026-07-26T12:35:12+00:00"
+}
+```
+
+> **Storage caveat.** Monitor registrations are persisted to a single JSON
+> file at `data/monitors.json`. This is intentionally simple and is NOT
+> production-grade: it does not scale beyond a few thousand monitors, offers
+> no concurrency guarantees under heavy write load, and is not encrypted at
+> rest. For production scale, swap the storage layer for Redis or Postgres
+> and use a real task queue (Celery, RQ, arq) instead of the in-process
+> background task. The webhook delivery itself is best-effort: a 10s timeout
+> per POST, one retry on any non-2xx response or transport error, and every
+> delivery attempt is appended to `data/monitor-log.jsonl` (one JSON object
+> per line) for audit. The registering HTTP request is never blocked by
+> webhook delivery.
+
 ### GET /status
 
 Returns data loading status and entity counts per source (`ofac`, `un`,
-`eu`, `uk`), plus a `status` message per source (e.g. an EU FSF token-missing
-warning).
+`eu`, `uk`, `bis`), plus a `crypto_index` block with the OFAC digital
+currency address index stats. Each source block carries a `status` message
+(e.g. an EU FSF token-missing warning or a BIS `TRADE_GOV_API_KEY`-missing
+warning) so operators can see at a glance which lists are degraded.
 
 ### GET /health
 
@@ -201,6 +388,9 @@ pip install -r requirements.txt
 # Optional: set EU FSF token for EU data (UK + OFAC + UN need no token)
 set EU_FSF_TOKEN=your_eu_login_token   # Windows
 # export EU_FSF_TOKEN=your_eu_login_token   # macOS/Linux
+# Optional: set trade.gov API key for BIS CSL data (degrades gracefully if missing)
+set TRADE_GOV_API_KEY=your_trade_gov_key   # Windows
+# export TRADE_GOV_API_KEY=your_trade_gov_key   # macOS/Linux
 uvicorn app.main:app --reload --port 8127
 ```
 
@@ -217,8 +407,8 @@ python -m pytest tests/ -v
 ```
 
 Tests use small fixture files in `tests/fixtures/` and never touch the
-network, so they run in under a second. 17 tests (10 backward-compat + 7
-explainable-match) all pass.
+network, so they run in under a second. 31 tests (17 backward-compat +
+explainable-match + 14 v1.3 feature tests) all pass.
 
 ## Deployment notes
 
@@ -282,6 +472,20 @@ https://www.treasury.gov/ofac/downloads/sdn.xml
 
 UN public data. Source: UN Security Council Consolidated List,
 https://scsanctions.un.org/resources/xml/en/consolidated.xml
+
+### US BIS Consolidated Screening List (CSL)
+
+US federal government work -- public domain under 17 USC 105. Source:
+US International Trade Administration, Consolidated Screening List,
+https://www.trade.gov/consolidated-screening-list (API endpoint:
+https://api.trade.gov/gateway/v1/consolidated_screening_list/search).
+
+The CSL consolidates export-control and sanctions screening lists from
+multiple US agencies, including the BIS Denied Persons List (DPL), BIS
+Entity List, BIS Unverified List (UVL), BIS Military End-User (MEU) List,
+State Department ITAR Debarred Parties, and OFAC non-SDN entries. A free
+API key from https://developer.trade.gov/ is required (`TRADE_GOV_API_KEY`
+env var).
 
 ### OpenSanctions -- NOT used
 

@@ -2,7 +2,7 @@
 
 We avoid network access entirely by pre-populating the in-memory cache of
 `app.main` with small fixture data. This makes tests fast, deterministic,
-and independent of the live OFAC/UN/EU/UK feeds.
+and independent of the live OFAC/UN/EU/UK/BIS feeds.
 """
 from __future__ import annotations
 
@@ -22,13 +22,15 @@ def _load_fixture(name: str) -> list[dict]:
 
 
 @pytest.fixture(autouse=True)
-def populate_cache(monkeypatch):
+def populate_cache(monkeypatch, tmp_path):
     """Inject fixture data into the in-memory cache before each test.
 
     This also stubs out the refresh functions so no test ever hits the
-    network, regardless of query parameters.
+    network, regardless of query parameters. The BIS cache and the OFAC
+    crypto address index are also populated from fixtures.
     """
     from app import main
+    from app import crypto_index
 
     now = datetime.now(timezone.utc).isoformat()
     main._cache["ofac"]["data"] = _load_fixture("ofac-fixture.json")
@@ -51,6 +53,21 @@ def populate_cache(monkeypatch):
     main._cache["uk"]["loading"] = False
     main._cache["uk"]["status"] = None
 
+    # BIS fixture (trade.gov CSL). Tests that exercise the degrade path
+    # (missing TRADE_GOV_API_KEY) monkeypatch this to [].
+    bis_path = os.path.join(FIXTURE_DIR, "bis-fixture.json")
+    if os.path.exists(bis_path):
+        main._cache["bis"]["data"] = _load_fixture("bis-fixture.json")
+    else:
+        main._cache["bis"]["data"] = []
+    main._cache["bis"]["updated"] = now
+    main._cache["bis"]["loading"] = False
+    main._cache["bis"]["status"] = None
+
+    # Rebuild the OFAC digital currency address index from the OFAC fixture.
+    crypto_index.reset()
+    crypto_index.build_index(main._cache["ofac"]["data"])
+
     # Make refresh functions no-ops so `refresh=True` queries don't download.
     async def _noop_xml(source):
         return None
@@ -58,8 +75,21 @@ def populate_cache(monkeypatch):
     async def _noop_govfeed(short):
         return None
 
+    async def _noop_bis():
+        return None
+
     monkeypatch.setattr(main, "_refresh_xml_cache", _noop_xml, raising=False)
     monkeypatch.setattr(main, "_refresh_govfeed_async", _noop_govfeed, raising=False)
+    monkeypatch.setattr(main, "_refresh_bis_async", _noop_bis, raising=False)
+
+    # Isolate monitor storage in a per-test tmp dir so monitor tests don't
+    # pollute the real data/monitors.json on disk.
+    monkeypatch.setenv("SANCTIONS_CACHE_DIR", str(tmp_path))
+    # Reload monitors module so it picks up the new cache dir.
+    import importlib
+    from app import monitors as monitors_mod
+    importlib.reload(monitors_mod)
+    monkeypatch.setattr(main, "monitors", monitors_mod, raising=False)
 
 
 @pytest.fixture()

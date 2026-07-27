@@ -74,7 +74,7 @@ def test_multi_list_match(client):
     assert body["uk_matches"] >= 1
     # Total should be the sum across all sources (no double counting within
     # a source because entity_ids differ across lists).
-    assert body["total_matches"] == body["ofac_matches"] + body["un_matches"] + body["eu_matches"] + body["uk_matches"]
+    assert body["total_matches"] == body["ofac_matches"] + body["un_matches"] + body["eu_matches"] + body["uk_matches"] + body["bis_matches"]
 
 
 def test_additive_fields_present(client):
@@ -109,7 +109,7 @@ def test_status_reports_all_four_sources(client):
 
 
 def test_root_lists_all_four_sources(client):
-    """The root endpoint advertises all four sources."""
+    """The root endpoint advertises all five sources (OFAC, UN, EU, UK, BIS)."""
     r = client.get("/")
     assert r.status_code == 200
     body = r.json()
@@ -117,7 +117,8 @@ def test_root_lists_all_four_sources(client):
     assert "UN Consolidated" in body["sources"]
     assert "EU Consolidated" in body["sources"]
     assert "UK FCDO" in body["sources"]
-    assert body["version"] == "1.2.0"
+    assert "BIS CSL" in body["sources"]
+    assert body["version"] == "1.3.0"
 
 
 def test_aka_match(client):
@@ -247,7 +248,7 @@ def test_no_match_clean_verdict(client):
     assert body["total_matches"] == 0
     verdict = body["risk_verdict"]
     assert verdict.startswith("CLEAN")
-    assert "4 lists screened" in verdict
+    assert "5 lists screened" in verdict
 
 
 def test_multi_match_picks_highest_severity_verdict(client):

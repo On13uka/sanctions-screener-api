@@ -1,0 +1,29 @@
+[
+  {
+    "entity_id": "bis-dpl-001",
+    "name": "ZHANG SAN TRADE CO",
+    "type": "Entity",
+    "program": "BIS Denied Persons List",
+    "remarks": "License Requirement: exports of items subject to EAR; License Policy: denial",
+    "akas": ["Zhang San Trading"],
+    "lists": ["DPL"]
+  },
+  {
+    "entity_id": "bis-el-001",
+    "name": "SHENZEN FOURTH TECH",
+    "type": "Entity",
+    "program": "BIS Entity List",
+    "remarks": "License Requirement: all items subject to EAR; License Policy: presumption of denial",
+    "akas": ["Shenzhen 4th Tech"],
+    "lists": ["EL"]
+  },
+  {
+    "entity_id": "bis-uvl-001",
+    "name": "RANDOM EXPORTS LLC",
+    "type": "Entity",
+    "program": "BIS Unverified List",
+    "remarks": "Bona fide check could not be completed",
+    "akas": [],
+    "lists": ["UVL"]
+  }
+]

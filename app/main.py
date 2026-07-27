@@ -1,9 +1,12 @@
 ﻿"""Sanctions Screener API - unified search across government sanctions lists.
 
 Screens names against OFAC SDN (US Treasury), UN Consolidated List, EU
-Financial Sanctions Files (FSF), and the UK FCDO Sanctions List (UKSL).
-Returns unified results with match score, source, entity details, an
-explainable match explanation, and a plain-English risk verdict.
+Financial Sanctions Files (FSF), the UK FCDO Sanctions List (UKSL), and the
+US BIS Consolidated Screening List (DPL + Entity List + UVL + MEU). Returns
+unified results with match score, source, entity details, an explainable
+match explanation, and a plain-English risk verdict. Also exposes a dedicated
+crypto-wallet screening endpoint (OFAC SDN digital currency addresses) and a
+webhook monitoring service for new designations.
 
 Data sources (all commercially usable):
 - OFAC SDN List (US Treasury) - direct XML feed, US public domain (17 USC 105)
@@ -13,6 +16,9 @@ Data sources (all commercially usable):
   commercial reuse with attribution.
 - UK FCDO Sanctions List (UKSL) - official static XML at
   sanctionslist.fcdo.gov.uk, Open Government Licence v3.0 (commercial OK).
+- US BIS Consolidated Screening List (CSL) - trade.gov API (free
+  TRADE_GOV_API_KEY). US public domain (17 USC 105). Covers BIS DPL, Entity
+  List, Unverified List, and Military End-User List.
 
 OpenSanctions is intentionally NOT used: its bulk data is CC BY-NC 4.0 and
 cannot be used for commercial compliance screening without a paid data
@@ -22,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import tempfile
 from datetime import datetime, timezone
 from typing import Any
@@ -31,11 +36,15 @@ import certifi
 import httpx
 import xmltodict
 from contextlib import asynccontextmanager
+from pydantic import BaseModel
 
-from fastapi import FastAPI, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
+from . import bis as bis_mod
+from . import crypto_index
 from . import govfeeds
+from . import monitors
 
 
 @asynccontextmanager
@@ -43,33 +52,42 @@ async def lifespan(app: FastAPI):
     """Load sanctions data on startup.
 
     XML sources (OFAC, UN) are downloaded in parallel. Official government
-    feed sources (EU FSF, UK FCDO) are loaded from the on-disk cache if fresh;
-    otherwise they are downloaded in a background thread so the server can
-    start serving the already-cached OFAC/UN results without blocking on
-    EU/UK downloads.
+    feed sources (EU FSF, UK FCDO) and the trade.gov BIS CSL are loaded from
+    the on-disk cache if fresh; otherwise they are downloaded in a background
+    thread so the server can start serving the already-cached OFAC/UN results
+    without blocking on EU/UK/BIS downloads.
+
+    After the OFAC load completes we also rebuild the in-memory OFAC SDN
+    digital-currency-address index used by /screen_crypto.
     """
     await asyncio.gather(_refresh_xml_cache("ofac"), _refresh_xml_cache("un"))
-    # Kick off EU/UK loads in the background; they populate the cache when done.
-    # If the cache is already fresh this returns quickly.
+    # Build the crypto index from whatever OFAC data we just loaded (it may
+    # be empty on a cold start before the download finishes; the index is
+    # rebuilt on every refresh too).
+    crypto_index.build_index(_cache["ofac"]["data"])
+    # Kick off EU/UK/BIS loads in the background; they populate the cache
+    # when done. If the cache is already fresh this returns quickly.
     asyncio.create_task(_refresh_govfeed_async("eu"))
     asyncio.create_task(_refresh_govfeed_async("uk"))
+    asyncio.create_task(_refresh_bis_async())
     yield
 
 
 app = FastAPI(
     title="Sanctions Screener API",
     description=(
-        "Screen names against OFAC SDN, UN Consolidated, EU FSF, "
-        "and UK FCDO sanctions lists."
+        "Screen names against OFAC SDN, UN Consolidated, EU FSF, UK FCDO, "
+        "and US BIS CSL sanctions lists. Includes crypto wallet screening "
+        "and webhook monitoring for new designations."
     ),
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
 OFAC_SDN_URL = "https://www.treasury.gov/ofac/downloads/sdn.xml"
 UN_CONSOLIDATED_URL = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
 REQUEST_TIMEOUT = 120.0
-HEADERS = {"User-Agent": "SanctionsScreenerAPI/1.2 (contact: builder@api-portfolio.local)"}
+HEADERS = {"User-Agent": "SanctionsScreenerAPI/1.3 (contact: builder@api-portfolio.local)"}
 
 # In-memory cache for the XML-backed sources (OFAC, UN).
 _cache: dict[str, Any] = {
@@ -79,6 +97,7 @@ _cache: dict[str, Any] = {
     # the /status endpoint can report them uniformly.
     "eu": {"data": [], "updated": None, "loading": False, "status": None},
     "uk": {"data": [], "updated": None, "loading": False, "status": None},
+    "bis": {"data": [], "updated": None, "loading": False, "status": None},
 }
 
 # Map our internal source keys to the `source` label returned in the API
@@ -86,11 +105,13 @@ _cache: dict[str, Any] = {
 # existing clients keep working. The EU/UK labels are preserved from v1.1
 # ("EU Consolidated", "UK FCDO") so v1.1 clients keep working too -- only the
 # underlying data source changes (OpenSanctions -> official government feeds).
+# v1.3 adds the BIS label.
 SOURCE_LABELS = {
     "ofac": "OFAC SDN",
     "un": "UN Consolidated",
     "eu": "EU Consolidated",
     "uk": "UK FCDO",
+    "bis": "BIS CSL",
 }
 
 # Optional fixture paths for tests. Set SANCTIONS_FIXTURE_DIR to a folder
@@ -305,6 +326,13 @@ async def _refresh_xml_cache(source: str):
         _cache[source]["data"] = entities
         _cache[source]["updated"] = datetime.now(timezone.utc).isoformat()
         _cache[source]["status"] = None
+        # When OFAC refreshes, rebuild the crypto address index so
+        # /screen_crypto reflects the latest digital currency addresses.
+        if source == "ofac":
+            try:
+                crypto_index.build_index(entities)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[sanctions] crypto index rebuild failed: {exc}")
     except Exception as exc:
         _cache[source]["status"] = f"load error: {exc}"
     finally:
@@ -348,6 +376,40 @@ async def _refresh_govfeed_async(short: str):
     """Async wrapper that runs the blocking govfeed load in a thread."""
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _refresh_govfeed, short)
+
+
+# ---------------------------------------------------------------------------
+# BIS Consolidated Screening List loader (trade.gov CSL)
+# ---------------------------------------------------------------------------
+
+def _refresh_bis() -> None:
+    """Synchronously load the BIS CSL data into the cache.
+
+    Uses the on-disk cache when fresh; otherwise calls the trade.gov CSL API
+    (requires TRADE_GOV_API_KEY). In test mode (SANCTIONS_FIXTURE_DIR set)
+    loads from a bis-fixture.json file instead and never touches the network.
+    Degrades gracefully: if the API key is missing the cache is set to an
+    empty list with a clear status warning so /status can surface it.
+    """
+    if _cache["bis"]["loading"]:
+        return
+    _cache["bis"]["loading"] = True
+    try:
+        entities, updated, status = bis_mod.load_feed()
+        _cache["bis"]["data"] = entities
+        _cache["bis"]["updated"] = updated
+        _cache["bis"]["status"] = status
+    except Exception as exc:
+        _cache["bis"]["data"] = _cache["bis"].get("data", []) or []
+        _cache["bis"]["status"] = f"load error: {exc}"
+    finally:
+        _cache["bis"]["loading"] = False
+
+
+async def _refresh_bis_async():
+    """Async wrapper that runs the blocking BIS load in a thread."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _refresh_bis)
 
 
 # ---------------------------------------------------------------------------
@@ -488,10 +550,15 @@ async def api_error_handler(request: Request, exc: APIError):
 async def root():
     return {
         "name": "Sanctions Screener API",
-        "version": "1.2.0",
-        "sources": ["OFAC SDN", "UN Consolidated", "EU Consolidated", "UK FCDO"],
+        "version": "1.3.0",
+        "sources": [
+            "OFAC SDN", "UN Consolidated", "EU Consolidated",
+            "UK FCDO", "BIS CSL",
+        ],
         "endpoints": {
             "screen": "/screen?name=John+Doe&threshold=0.7",
+            "screen_crypto": "/screen_crypto?address=0x...&currency=ETH",
+            "monitor": "POST /monitor | GET /monitor/{id} | DELETE /monitor/{id} | POST /monitor/run",
             "status": "/status",
             "health": "/health",
         },
@@ -508,13 +575,14 @@ async def health():
 async def status():
     """Return data loading status and entity counts per source."""
     out: dict[str, Any] = {}
-    for key in ("ofac", "un", "eu", "uk"):
+    for key in ("ofac", "un", "eu", "uk", "bis"):
         out[key] = {
             "loaded": len(_cache[key]["data"]),
             "updated": _cache[key]["updated"],
             "loading": _cache[key]["loading"],
             "status": _cache[key].get("status"),
         }
+    out["crypto_index"] = crypto_index.index_stats()
     return out
 
 
@@ -526,35 +594,26 @@ async def screen(
 ):
     """Screen a name against all configured sanctions lists.
 
-    The response is additive over v1.0/v1.1: the existing `source`,
+    The response is additive over v1.0/v1.1/v1.2: the existing `source`,
     `match_score`, `ofac_matches`, `un_matches`, `eu_matches`, `uk_matches`,
-    and `matches` fields are preserved. New in v1.2: each match carries a
-    `match_explanation` object (which field matched, which value, match_type,
-    tokens matched) and the top-level `risk_verdict` gives a one-line
-    plain-English verdict. Old clients reading just `source` and
-    `match_score` keep working.
+    and `matches` fields are preserved. New in v1.3: a `bis_matches` count
+    and a `bis` entry under `data_updated`. Old clients reading just
+    `source` and `match_score` keep working.
     """
     query = _normalize_name(name)
-
-    # Refresh XML sources if asked or empty.
-    if refresh or not _cache["ofac"]["data"]:
-        await _refresh_xml_cache("ofac")
-    if refresh or not _cache["un"]["data"]:
-        await _refresh_xml_cache("un")
-    # Refresh official government feed sources if asked or empty.
-    if refresh or not _cache["eu"]["data"]:
-        await _refresh_govfeed_async("eu")
-    if refresh or not _cache["uk"]["data"]:
-        await _refresh_govfeed_async("uk")
+    await _ensure_data_loaded(refresh)
 
     ofac_results = await _search_source("ofac", query, threshold)
     un_results = await _search_source("un", query, threshold)
     eu_results = await _search_source("eu", query, threshold)
     uk_results = await _search_source("uk", query, threshold)
-    all_results = ofac_results + un_results + eu_results + uk_results
+    bis_results = await _search_source("bis", query, threshold)
+    all_results = (
+        ofac_results + un_results + eu_results + uk_results + bis_results
+    )
     all_results.sort(key=lambda x: x["match_score"], reverse=True)
 
-    screened_lists = 4
+    screened_lists = 5
     verdict = _risk_verdict(all_results, screened_lists)
 
     return {
@@ -567,14 +626,261 @@ async def screen(
         # v1.1 additive counts (preserved).
         "eu_matches": len(eu_results),
         "uk_matches": len(uk_results),
+        # v1.3 additive count (BIS CSL).
+        "bis_matches": len(bis_results),
         "matches": all_results,
-        # New in v1.2: plain-English risk verdict.
+        # v1.2: plain-English risk verdict.
         "risk_verdict": verdict,
         "data_updated": {
             "ofac": _cache["ofac"]["updated"],
             "un": _cache["un"]["updated"],
             "eu": _cache["eu"]["updated"],
             "uk": _cache["uk"]["updated"],
+            "bis": _cache["bis"]["updated"],
         },
         "screened_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _ensure_data_loaded(refresh: bool) -> None:
+    """Refresh all five sources if asked or if any cache is empty."""
+    if refresh or not _cache["ofac"]["data"]:
+        await _refresh_xml_cache("ofac")
+    if refresh or not _cache["un"]["data"]:
+        await _refresh_xml_cache("un")
+    if refresh or not _cache["eu"]["data"]:
+        await _refresh_govfeed_async("eu")
+    if refresh or not _cache["uk"]["data"]:
+        await _refresh_govfeed_async("uk")
+    if refresh or not _cache["bis"]["data"]:
+        await _refresh_bis_async()
+
+
+def _screen_all_sync(name: str, threshold: float = 0.7) -> list[dict]:
+    """Synchronous helper that re-screens a name against all five lists.
+
+    Used by the monitor runner (which runs in a background thread) so it does
+    not need to interact with the asyncio event loop. Reads from the current
+    in-memory cache; does not trigger refreshes.
+    """
+    query = _normalize_name(name)
+    results: list[dict] = []
+    for source in ("ofac", "un", "eu", "uk", "bis"):
+        data = _cache[source]["data"]
+        if not data:
+            continue
+        label = SOURCE_LABELS.get(source, source.upper())
+        for entity in data:
+            name_score = _score_match(query, entity["name"])
+            best_aka_score = 0.0
+            best_aka = None
+            for aka in entity.get("akas", []):
+                aka_score = _score_match(query, aka)
+                if aka_score > best_aka_score:
+                    best_aka_score = aka_score
+                    best_aka = aka
+            if best_aka_score > name_score:
+                final_score = best_aka_score
+                matched_field = "aka"
+                matched_value = best_aka or ""
+            else:
+                final_score = name_score
+                matched_field = "name"
+                matched_value = entity["name"]
+            if final_score >= threshold:
+                explanation = _build_explanation(
+                    matched_field, matched_value, final_score, query
+                )
+                results.append({
+                    "source": label,
+                    "entity_id": entity["entity_id"],
+                    "name": entity["name"],
+                    "type": entity["type"],
+                    "program": entity["program"],
+                    "remarks": entity["remarks"],
+                    "matched_aka": best_aka if matched_field == "aka" else None,
+                    "match_score": round(final_score, 2),
+                    "match_type": _classify_match(final_score),
+                    "match_explanation": explanation,
+                })
+    results.sort(key=lambda x: x["match_score"], reverse=True)
+    return results[:50]
+
+
+# ---------------------------------------------------------------------------
+# Crypto wallet screening (OFAC SDN digital currency addresses)
+# ---------------------------------------------------------------------------
+
+@app.get("/screen_crypto")
+async def screen_crypto(
+    address: str = Query(..., description="Crypto wallet address to screen, e.g. '0x901b...' or 'bc1q...'"),
+    currency: str = Query(..., description="Digital currency symbol, e.g. 'ETH', 'BTC', 'XBT', 'XMR', 'LTC'"),
+):
+    """Screen a crypto wallet address against OFAC SDN digital currency addresses.
+
+    OFAC's SDN List (US public domain, 17 USC 105) includes digital currency
+    addresses for some sanctioned individuals and entities (per OFAC FAQ
+    563). This endpoint looks the address up in an in-memory index built
+    from the OFAC SDN `<remarks>` text and refreshed on every OFAC feed
+    refresh. Supported currencies include BTC/XBT (Bitcoin aliases), ETH,
+    LTC, XMR, XRP, DASH, NEO, MIOTA, PTR, and any other
+    "Digital Currency Address - <SYM>" prefix present in the SDN data.
+
+    The index is bounded by the number of addresses OFAC has published
+    (~tens of thousands at most, well under the 100k cap) and occupies
+    <20MB of memory.
+
+    Returns `sanctioned: true` with match details when the address is
+    listed, or `sanctioned: false` with an empty matches array and a CLEAN
+    risk verdict when the address is not found.
+    """
+    addr = (address or "").strip()
+    cur = (currency or "").strip()
+    if not addr or not cur:
+        raise APIError(422, "invalid_params", "Both 'address' and 'currency' are required")
+    if len(addr) > 256:
+        raise APIError(422, "invalid_address", "Address too long (max 256 chars per OFAC SDN)")
+
+    # Ensure the crypto index is built. If OFAC data is empty (cold start with
+    # no network), the index will be empty and the lookup returns CLEAN.
+    if not crypto_index.is_built() and _cache["ofac"]["data"]:
+        crypto_index.build_index(_cache["ofac"]["data"])
+
+    matches = crypto_index.lookup(addr, cur)
+    sanctioned = bool(matches)
+    if sanctioned:
+        first = matches[0]
+        entity_name = first.get("entity_name") or "an OFAC-sanctioned entity"
+        program = first.get("program") or ""
+        prog_clause = f" ({program} program)" if program else ""
+        verdict = (
+            f"HIGH RISK: address belongs to OFAC-sanctioned entity "
+            f"{entity_name}{prog_clause}"
+        )
+    else:
+        verdict = (
+            "CLEAN: address not found in OFAC SDN digital currency addresses"
+        )
+
+    return {
+        "address": addr,
+        "currency": cur.upper(),
+        "sanctioned": sanctioned,
+        "matches": matches,
+        "risk_verdict": verdict,
+        "index_built_at": crypto_index.index_stats().get("built_at"),
+        "data_updated": _cache["ofac"]["updated"],
+        "screened_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Webhook monitoring for new designations
+# ---------------------------------------------------------------------------
+
+class MonitorRequest(BaseModel):
+    name: str
+    webhook_url: str
+    lists: list[str] | None = None
+
+
+@app.post("/monitor")
+async def monitor_register(req: MonitorRequest):
+    """Register a webhook monitor for an entity name.
+
+    The checker re-screens the name against the configured lists on each
+    /monitor/run cycle. When a NEW match appears (a list or entity that was
+    not matched on the previous run), the API POSTs a webhook payload to the
+    registered URL. Delivery is best-effort: 10s timeout, one retry, status
+    recorded in the monitor's history and appended to data/monitor-log.jsonl.
+
+    Storage: monitor registrations are persisted to a simple JSON file on
+    disk (data/monitors.json). This is NOT production-grade -- for scale use
+    Redis/Postgres + a real task queue. Documented as best-effort.
+    """
+    name = (req.name or "").strip()
+    if not name or len(name) > 500:
+        raise APIError(422, "invalid_name", "Provide a non-empty name (max 500 chars)")
+    url = (req.webhook_url or "").strip()
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        raise APIError(422, "invalid_webhook_url", "webhook_url must be http(s)://...")
+    monitor = monitors.register(name=name, webhook_url=url, lists=req.lists or [])
+    return {
+        "monitor_id": monitor["monitor_id"],
+        "status": "registered",
+        "name": monitor["name"],
+        "webhook_url": monitor["webhook_url"],
+        "lists": monitor["lists"],
+        "created_at": monitor["created_at"],
+        "next_check": "call POST /monitor/run to trigger a check cycle",
+    }
+
+
+@app.get("/monitor/{monitor_id}")
+async def monitor_get(monitor_id: str):
+    """Return the status + history of a single monitor."""
+    monitor = monitors.get(monitor_id)
+    if not monitor:
+        raise APIError(404, "not_found", f"monitor {monitor_id} not found")
+    return monitor
+
+
+@app.delete("/monitor/{monitor_id}")
+async def monitor_delete(monitor_id: str):
+    """Unregister a monitor."""
+    ok = monitors.delete(monitor_id)
+    if not ok:
+        raise APIError(404, "not_found", f"monitor {monitor_id} not found")
+    return {"monitor_id": monitor_id, "status": "deleted"}
+
+
+@app.post("/monitor/run")
+async def monitor_run(background_tasks: BackgroundTasks):
+    """Trigger a check cycle across all registered monitors (cron-callable).
+
+    Re-screens every registered monitor's name against the currently-loaded
+    sanctions lists and fires webhooks for any new matches. The webhook
+    delivery itself is scheduled as a FastAPI background task so this
+    endpoint returns immediately with a summary of what was checked.
+
+    Best-effort: webhook delivery has a 10s timeout and one retry. Delivery
+    status is recorded in each monitor's `history` array and appended to
+    data/monitor-log.jsonl.
+    """
+    # Run the check cycle synchronously (fast for small monitor counts) but
+    # WITHOUT delivering webhooks in the foreground -- we schedule delivery
+    # via BackgroundTasks so the response returns immediately. We still
+    # compute the summary of what changed.
+    summary = monitors.run_checks(_screen_all_sync, deliver=False)
+
+    # For each monitor that fired, schedule a background delivery of its new
+    # matches. We re-read the monitor list to get the fresh state.
+    fired_monitors = [
+        m for m in monitors.list_all()
+        if m.get("history") and m["history"][-1].get("event") == "new_match"
+    ]
+    for m in fired_monitors:
+        last = m["history"][-1]
+        payload = {
+            "event": "new_match",
+            "monitor_id": m["monitor_id"],
+            "name": m["name"],
+            "new_match_count": sum(
+                1 for h in m["history"] if h.get("event") == "new_match"
+            ),
+            "detail": last.get("detail", ""),
+            "screened_at": m.get("last_check"),
+        }
+        background_tasks.add_task(
+            monitors.deliver_webhook, m.get("webhook_url") or "", payload
+        )
+
+    return {
+        "status": "ok",
+        "checked": summary["checked"],
+        "fired": summary["fired"],
+        "failed": summary["failed"],
+        "monitors": len(monitors.list_all()),
+        "note": "webhook deliveries dispatched in the background",
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
     }
