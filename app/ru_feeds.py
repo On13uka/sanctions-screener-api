@@ -238,7 +238,9 @@ def load_feed(short: str = "RU") -> tuple[list[dict], str | None, str | None]:
     - When the download fails: returns the cached list (even if stale) with
       an error string; when no cache exists at all, returns (empty, None, err).
     """
+    global _LAST_FETCH_STATUS
     if not RU_FEEDS_ENABLED:
+        _LAST_FETCH_STATUS = "disabled"
         return [], None, "disabled"
 
     short = short.upper()
@@ -252,10 +254,13 @@ def load_feed(short: str = "RU") -> tuple[list[dict], str | None, str | None]:
 
     xml = _download(DEFAULT_ROSFIN_URL)
     if xml is None:
+        _LAST_FETCH_STATUS = "download_failed"
         # Fall back to stale cache if we have one.
         cached = _read_json_cache(short)
         if cached:
+            _LAST_FETCH_STATUS = "download_failed_used_cache"
             return cached, "RU Rosfinmonitoring", "download_failed_used_cache"
+        _LAST_FETCH_STATUS = "download_failed"
         return [], None, "download_failed"
 
     entities = _parse_rosfin(xml)
@@ -263,10 +268,12 @@ def load_feed(short: str = "RU") -> tuple[list[dict], str | None, str | None]:
         # Possibly an HTML page (publisher sometimes wraps XML in HTML).
         # Save the raw bytes for debugging but report an empty list.
         _write_xml_cache(short, xml)
+        _LAST_FETCH_STATUS = "parse_returned_empty"
         return [], None, "parse_returned_empty"
 
     _write_xml_cache(short, xml)
     _write_json_cache(short, entities)
+    _LAST_FETCH_STATUS = "ok"
     return entities, "RU Rosfinmonitoring", None
 
 
@@ -283,15 +290,21 @@ def load_fixture(path: str) -> tuple[list[dict], str | None]:
 # ---------------------------------------------------------------------------
 # Status helper for the /status endpoint.
 # ---------------------------------------------------------------------------
+_LAST_FETCH_STATUS = "unknown"  # updated by load_feed
+
+
 def status() -> dict[str, Any]:
     return {
         "enabled": RU_FEEDS_ENABLED,
         "source": "RU Rosfinmonitoring (401-FZ)",
         "url": DEFAULT_ROSFIN_URL,
         "experimental": True,
+        "last_fetch_status": _LAST_FETCH_STATUS,
         "note": (
             "Russian-context compliance is experimental. The publisher is "
             "less stable than EU/UK/US feeds and the reuse license is not "
-            "explicit. Enable with RU_FEEDS_ENABLED=true."
+            "explicit. The default URL has not been verified to return valid "
+            "XML at publish time; override with RU_ROSFIN_URL if it 404s. "
+            "Enable with RU_FEEDS_ENABLED=true."
         ),
     }
