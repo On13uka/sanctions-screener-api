@@ -1,0 +1,17 @@
+{
+  "monitors": {
+    "mon_5b632226": {
+      "monitor_id": "mon_5b632226",
+      "name": "LAZARUS GROUP",
+      "webhook_url": "https://example.com/hook",
+      "lists": [
+        "OFAC"
+      ],
+      "created_at": "2026-07-27T12:02:09.515245+00:00",
+      "last_check": null,
+      "last_match_signature": null,
+      "history": []
+    }
+  },
+  "updated_at": "2026-07-27T12:02:09.515361+00:00"
+}
