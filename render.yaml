@@ -8,3 +8,11 @@
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.2
+      - key: EU_FSF_TOKEN
+        sync: false  # set manually (free EU Login)
+      - key: TRADE_GOV_API_KEY
+        sync: false  # set manually (free trade.gov)
+      - key: RU_FEEDS_ENABLED
+        value: "false"  # experimental, enable when ready
+    healthCheckPath: /health
+    autoDeploy: true
